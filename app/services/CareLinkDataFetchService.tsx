@@ -4,54 +4,14 @@ import TokenPayloadService from "@/app/services/TokenPayloadService";
 import AccessTokenValidator from "@/app/services/AccessTokenValidator";
 import TokenRefreshService from "@/app/services/TokenRefreshService";
 import CareLinkConfigService from "@/app/services/CareLinkConfigService";
+import { connectToDatabase } from '@/app/services/MongoService';
+import {MongoClient} from "mongodb";
 
-const updateEnvVariables = (newEnvVariables: object) => {
-    try {
-        // Read existing .env.local file
-        const currentEnvContent = fs.readFileSync('.env.local', 'utf8');
-        const data = {
-            "ACCESS_TOKEN": newEnvVariables.accessToken,
-            "REFRESH_TOKEN": newEnvVariables.refreshToken,
-            "SCOPE": process.env.SCOPE,
-            "CLIENT_ID": process.env.CLIENT_ID,
-            "CLIENT_SECRET": process.env.CLIENT_SECRET,
-            "MAG_IDENTIFIER": process.env.MAG_IDENTIFIER,
-        };
-
-
-        // Parse existing environment variables
-        const currentEnvVariables = currentEnvContent
-            .split('\n')
-            .map(line => line.split('='))
-            .reduce((acc, [key, value]) => {
-                if (key) {
-                    acc[key] = value;
-                }
-                return acc;
-            }, {} as Record<string, string>);
-
-        // Update existing environment variables with new values
-        const updatedEnvVariables = { ...currentEnvVariables, ...data };
-
-        // Serialize updated environment variables
-        const updatedEnvContent = Object.entries(updatedEnvVariables)
-            .map(([key, value]) => `${key}=${value}`)
-            .join('\n');
-
-        // Write to a new .env.local file
-        fs.writeFileSync('.env.local', updatedEnvContent, 'utf8');
-        dotenv.config();
-
-        console.log('.env.local file updated successfully.');
-    } catch (error) {
-        console.error('Error updating .env.local file:', error);
-    }
-};
-
+let isWriting = false;
 class CareLinkDataFetchService {
     async getLast24HoursData() {
-        const data = {
-            "accessToken": process.env.ACCESS_TOKEN,
+        let data: object = {
+            "accessToken": '',
             "refreshToken": process.env.REFRESH_TOKEN,
             "scope": process.env.SCOPE,
             "clientId": process.env.CLIENT_ID,
@@ -59,21 +19,44 @@ class CareLinkDataFetchService {
             "magIdentifier": process.env.MAG_IDENTIFIER
         };
 
+        const client: MongoClient = await connectToDatabase();
+        const db = client.db();
+
+        const collections = await db.listCollections({name: "tokens"}).toArray();
+        if (collections.length === 0) {
+            await db.createCollection("tokens");
+        }
+        const fieldExists = await db.collection("tokens").findOne({accessToken: {$exists: true}});
+
+        if (!fieldExists) {
+            if (!isWriting) {
+                isWriting = true;
+                const accessToken = process.env.ACCESS_TOKEN;
+                data.accessToken = accessToken;
+                await db.collection("tokens").insertOne({accessToken});
+                isWriting = false;
+            }
+        } else {
+            data.accessToken = fieldExists.accessToken == null ? process.env.ACCESS_TOKEN : fieldExists.accessToken;
+        }
+
         const tokenPayloadService = new TokenPayloadService();
         const accessTokenValidator: AccessTokenValidator = new AccessTokenValidator();
         const tokenRefreshService: TokenRefreshService = new TokenRefreshService();
         const accessTokenPayload = tokenPayloadService.getAccessTokenPayload(data);
         const isTokenValid = accessTokenValidator.validate(accessTokenPayload);
 
-        if (!isTokenValid) {
+        if (isTokenValid) {
             const careLinkConfigService = new CareLinkConfigService();
             const careLinkConfig :Record<string, any> | null = await careLinkConfigService.getConfig("RO");
-            const newAccessData = await tokenRefreshService.refresh(careLinkConfig, data);
-            data.accessToken = newAccessData.accessToken;
-            data.refreshToken = newAccessData.refreshToken;
-            updateEnvVariables(data);
-        }
+            data = await tokenRefreshService.refresh(careLinkConfig, data);
+            const accessToken = data.accessToken;
 
+            await db.collection("tokens").updateOne(
+                { accessToken: { $exists: true } },
+                { $set: { accessToken } }
+            );
+        }
         const headers: object = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -81,6 +64,8 @@ class CareLinkDataFetchService {
             'mag-identifier': data.magIdentifier,
             'Authorization': 'Bearer ' + data.accessToken
         };
+
+        console.log(JSON.stringify(headers));
         const currentTimestamp: number = Math.floor(Date.now() / 1000); // Get current timestamp in seconds
         const currentTimestampAsString: string = currentTimestamp.toString();
 

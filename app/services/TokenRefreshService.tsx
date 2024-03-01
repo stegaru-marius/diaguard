@@ -1,17 +1,9 @@
-interface TokenData {
-  refresh_token: string;
-  client_id: string;
-  client_secret: string;
-  grant_type: string;
-  access_token: string;
-}
-
 interface Config {
   token_url: string;
 }
 
 class TokenRefreshService {
-  async refresh(config: Config, tokenData: TokenData): Promise<TokenData> {
+  async refresh(config: Config, tokenData): Promise<TokenData> {
     try {
       const tokenUrl = config.tokenUrl;
       const data = {
@@ -22,7 +14,10 @@ class TokenRefreshService {
       };
       const headers = {
         'mag-identifier': tokenData.magIdentifier,
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Connection': 'keep-alive',
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate, br'
       };
 
       const formData = new URLSearchParams();
@@ -33,14 +28,16 @@ class TokenRefreshService {
       const response = await fetch(tokenUrl, {
         method: 'POST',
         headers,
-        body: formData.toString()
+        body: formData.toString(),
+        cache: 'no-store'
       });
 
       if (!response.ok) {
         throw new Error('ERROR: failed to refresh token');
       }
 
-      const newData: TokenData = await response.json();
+      const newData = await response.json();
+
       tokenData.accessToken = newData.access_token;
       tokenData.refreshToken = newData.refresh_token;
 
